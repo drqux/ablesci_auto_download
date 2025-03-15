@@ -13,7 +13,6 @@ try:
     import sys
     import traceback
 
-
     # 获取资源路径的函数
     def resource_path(relative_path):
         """获取资源的绝对路径，适用于开发环境和PyInstaller打包后的环境"""
