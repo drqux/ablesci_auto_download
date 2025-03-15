@@ -62,10 +62,46 @@ try:
             "safebrowsing.enabled": True
         }
         options.add_experimental_option("prefs", prefs)
+        
+        def get_application_path():
+            """获取应用程序的实际运行路径"""
+            if getattr(sys, 'frozen', False):
+                # 如果是打包后的可执行文件
+                return os.path.dirname(sys.executable)
+            else:
+                # 如果是普通Python脚本
+                return os.path.dirname(os.path.abspath(__file__))
 
-        # 使用Service对象初始化WebDriver
-        # service = Service(executable_path=get_driver_path())
-        driver = webdriver.Chrome(options=options)
+        try:
+            # 尝试使用自动管理模式
+            options = Options()
+            driver = webdriver.Chrome(options=options)
+        except Exception as e:
+            print(f"自动管理失败: {e}")
+            print("尝试使用本地ChromeDriver...")
+            
+            # 使用本地ChromeDriver
+            # 查找可能的chromedriver位置
+            app_path = get_application_path()
+            possible_paths = [
+                os.path.join(app_path, "chromedriver.exe"),  # 应用程序目录
+                os.path.join(os.getcwd(), "chromedriver.exe"),  # 当前工作目录
+                "chromedriver.exe"  # 相对路径
+            ]
+            
+            driver_found = False
+            for chrome_driver_path in possible_paths:
+                if os.path.exists(chrome_driver_path):
+                    print(f"找到ChromeDriver: {chrome_driver_path}")
+                    service = Service(executable_path=chrome_driver_path)
+                    driver = webdriver.Chrome(service=service)
+                    driver_found = True
+                    break
+            
+            if not driver_found:
+                paths_str = "\n".join(possible_paths)
+                raise Exception(f"ChromeDriver未找到，已尝试以下路径:\n{paths_str}")
+
         driver.minimize_window()
 
         
