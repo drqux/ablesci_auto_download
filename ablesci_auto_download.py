@@ -11,6 +11,7 @@ try:
     import time
     import os
     import sys
+    import re
     import traceback
 
     # 获取资源路径的函数
