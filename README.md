@@ -39,7 +39,7 @@
 ### 快速开始
 
 1. **配置Cookies**（重要！）  
-   替换脚本中的`cookies_str`为您登录后的有效cookies
+   将您登录后的有效cookies复制并保存至ablesci_auto_download.py同目录下的cookies.txt文件中（注意不要留空格）
 
 2. **运行脚本**  
 
