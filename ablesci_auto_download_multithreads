@@ -1,0 +1,346 @@
+import logging
+import threading
+import queue
+
+logging.basicConfig(filename='error_log.txt', level=logging.ERROR)
+try:
+    ###多个文献下载功能
+    from selenium import webdriver
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.chrome.service import Service
+    import time
+    import os
+    import sys
+    import re
+    import traceback
+
+    # 获取资源路径的函数
+    def resource_path(relative_path):
+        """获取资源的绝对路径，适用于开发环境和PyInstaller打包后的环境"""
+        try:
+            # PyInstaller创建临时文件夹并将路径存储在_MEIPASS中
+            base_path = sys._MEIPASS
+        except Exception:
+            base_path = os.path.abspath(".")
+        return os.path.join(base_path, relative_path)
+
+    # 线程锁，用于线程安全的打印操作
+    print_lock = threading.Lock()
+
+    # 线程安全的打印函数
+    def safe_print(*args, **kwargs):
+        with print_lock:
+            print(*args, **kwargs)
+
+    # 创建下载文件夹
+    download_folder = os.path.join(os.getcwd(), "文献下载")
+    if not os.path.exists(download_folder):
+        os.makedirs(download_folder)
+        safe_print(f"已创建下载文件夹: {download_folder}")
+    else:
+        safe_print(f"使用现有下载文件夹: {download_folder}")
+
+    # 获取cookies
+    with open('cookies.txt', 'r') as file:
+        cookies_str = file.read()
+        
+    def get_application_path():
+        """获取应用程序的实际运行路径"""
+        if getattr(sys, 'frozen', False):
+            # 如果是打包后的可执行文件
+            return os.path.dirname(sys.executable)
+        else:
+            # 如果是普通Python脚本
+            return os.path.dirname(os.path.abspath(__file__))
+
+    # 创建一个函数来配置和获取WebDriver实例
+    def get_driver():
+        # 浏览器设置
+        options = Options()
+        options.add_argument("--disable-images")
+        options.add_argument("--disable-gpu")
+        #options.add_argument("--headless=new")
+        #options.add_argument("--window-size=1920,1080")
+        options.add_argument("--no-sandbox")
+        options.add_experimental_option("excludeSwitches", ["enable-logging"])
+        options.add_experimental_option("useAutomationExtension", False)
+        options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        
+        # 设置下载目录为专门的下载文件夹
+        prefs = {
+            "download.default_directory": download_folder,
+            "download.prompt_for_download": False,
+            "download.directory_upgrade": True,
+            "safebrowsing.enabled": True
+        }
+        options.add_experimental_option("prefs", prefs)
+        
+        try:
+            # 尝试使用自动管理模式
+            driver = webdriver.Chrome(options=options)
+        except Exception as e:
+            safe_print(f"自动管理失败: {e}")
+            safe_print("尝试使用本地ChromeDriver...")
+            
+            # 使用本地ChromeDriver
+            # 查找可能的chromedriver位置
+            app_path = get_application_path()
+            possible_paths = [
+                os.path.join(app_path, "chromedriver.exe"),  # 应用程序目录
+                os.path.join(os.getcwd(), "chromedriver.exe"),  # 当前工作目录
+                "chromedriver.exe"  # 相对路径
+            ]
+            
+            driver_found = False
+            for chrome_driver_path in possible_paths:
+                if os.path.exists(chrome_driver_path):
+                    safe_print(f"找到ChromeDriver: {chrome_driver_path}")
+                    service = Service(executable_path=chrome_driver_path)
+                    driver = webdriver.Chrome(service=service, options=options)
+                    driver_found = True
+                    break
+            
+            if not driver_found:
+                paths_str = "\n".join(possible_paths)
+                raise Exception(f"ChromeDriver未找到，已尝试以下路径:\n{paths_str}")
+
+        driver.minimize_window()
+        
+        # 初次访问网站以设置Cookie
+        driver.get("https://www.ablesci.com/")
+        
+        # 添加Cookie
+        for cookie in cookies_str.split(';'):
+            name, value = cookie.strip().split('=', 1)
+            driver.add_cookie({'name': name, 'value': value, 'domain': '.ablesci.com'})
+        
+        # 刷新页面使Cookie生效
+        driver.refresh()
+        
+        return driver
+
+    # 用于处理单个DOI的函数
+    def process_doi(doi, result_queue, thread_id, is_last=False):
+        driver = None
+        try:
+            safe_print(f"[线程 {thread_id}] 开始处理DOI/PMID: {doi}")
+            
+            driver = get_driver()
+            wait = WebDriverWait(driver, 20)
+            short_wait = WebDriverWait(driver, 1)
+            
+            # 点击导航按钮回到文献查询页面
+            time.sleep(2)
+            nav_button = wait.until(EC.element_to_be_clickable(
+                (By.CSS_SELECTOR, "body > div.able-header.header-bg-assist > div > div > a")))
+            safe_print(f"[线程 {thread_id}] 正在跳转到查询页面...")
+            nav_button.click()
+            
+            # 表单操作
+            input_selector = "#onekey"
+            submit_selector = "#assist-create-form > div.alert.alert-success > div.layui-form-item.layui-row > div:nth-child(2) > div > button"
+            confirm_button = '#layui-layer2 > div.layui-layer-btn.layui-layer-btn- > a.layui-layer-btn0'
+            
+            wait.until(EC.visibility_of_element_located(
+                (By.CSS_SELECTOR, input_selector))).clear()  # 清除之前的输入
+            wait.until(EC.visibility_of_element_located(
+                (By.CSS_SELECTOR, input_selector))).send_keys(doi)
+            
+            wait.until(EC.element_to_be_clickable(
+                (By.CSS_SELECTOR, submit_selector))).click()
+            time.sleep(3)
+            wait.until(EC.element_to_be_clickable(
+                (By.CSS_SELECTOR, confirm_button))).click()
+            time.sleep(0.5)
+            try:
+                short_wait.until(EC.element_to_be_clickable(
+                    (By.XPATH, "//a[text()='仍然提交']"))).click()
+                time.sleep(1)
+            except:
+                pass
+            ##点击查看求助详情
+            try:
+                detail_button = wait.until(EC.presence_of_element_located(
+                    (By.CSS_SELECTOR, "a.layui-layer-btn0")))
+                driver.execute_script("arguments[0].click();", detail_button)
+            except Exception as e:
+                print(f"点击查看求助详情失败: {str(e)}")
+            time.sleep(3)
+            
+            # 获取当前页面的 URL(暂时无用)
+            #current_url = driver.current_url
+            #match = re.search(r'id=([^&]+)', current_url)
+            #if match:
+                #article_id = match.group(1)
+            #else:
+                #article_id = None
+
+            # 等待确认框出现并点击
+            safe_print(f"[线程 {thread_id}] 正在搜索文献 DOI/PMID: {doi}，这可能需要几分钟...")
+            
+            ###获取文献名称
+            article_name = driver.find_element(By.CSS_SELECTOR, "#LAY_ucm > div:nth-child(1) > div.assist-detail.layui-row > div > table > tbody > tr:nth-child(1) > td.assist-title > div:nth-child(1)")
+            article_name_content = article_name.text
+            
+            # 使用较长的等待时间
+            long_wait = WebDriverWait(driver, 28800)  # 8小时
+            confirm_button = long_wait.until(EC.presence_of_element_located(
+                    (By.XPATH, "//a[text()='确定']")))
+            driver.execute_script("arguments[0].click();", confirm_button)
+            safe_print(f"[线程 {thread_id}] 确认文献")
+            time.sleep(1)
+                            
+            # 查看并审核
+            try:                    
+                censor_button = short_wait.until(EC.presence_of_element_located(
+                    (By.XPATH, "//a[text()='确定']")))
+                driver.execute_script("arguments[0].click();", censor_button)
+                time.sleep(1)              
+            except:
+                pass
+           
+            # 点击下载链接
+            safe_print(f"[线程 {thread_id}] 等待下载链接出现...")
+            download_link = wait.until(EC.element_to_be_clickable(
+                (By.CSS_SELECTOR, "a[title='点击下载']")))
+            download_url = download_link.get_attribute("href")
+            safe_print(f"[线程 {thread_id}] 下载地址: {download_url}")
+            safe_print(f"[线程 {thread_id}] 点击下载链接...")
+            download_link.click()
+            time.sleep(1)
+            ###自动采纳
+            wait.until(EC.element_to_be_clickable(
+                (By.CSS_SELECTOR, "#uploaded-file-handle > button:nth-child(1)"))).click()
+            wait.until(EC.element_to_be_clickable(
+                (By.CSS_SELECTOR, "#layui-layer2 > div.layui-layer-btn.layui-layer-btn- > a.layui-layer-btn0"))).click()
+            wait.until(EC.element_to_be_clickable(
+                (By.CSS_SELECTOR, "#layui-layer4 > div.layui-layer-btn.layui-layer-btn- > a"))).click()
+            
+            # 等待下载完成
+            safe_print(f"[线程 {thread_id}] 文献 {article_name_content} 的下载已开始")
+            time.sleep(10)  # 给下载一些时间启动
+            
+            # 获取积分信息 - 只有最后一个线程获取积分
+            credits_content = None
+            try:
+                if is_last:
+                    credits = driver.find_element(By.CSS_SELECTOR, "#user-point-now")
+                    credits_content = credits.text
+                    # 将积分信息添加到结果队列
+                    result_queue.put(('credits', credits_content))
+            except Exception as e:
+                safe_print(f'[线程 {thread_id}] 无法获取剩余积分: {str(e)}')
+            
+            # 放入成功队列
+            result_queue.put(('success', doi, article_name_content))
+            
+        except Exception as e:
+            error_msg = f"[线程 {thread_id}] 处理DOI/PMID: {doi} 时发生错误: {str(e)}"
+            safe_print(error_msg)
+            safe_print(traceback.format_exc())
+            result_queue.put(('fail', doi, str(e)))
+            
+        finally:
+            if driver:
+                driver.quit()
+                safe_print(f"[线程 {thread_id}] 浏览器已关闭")
+
+    # 主执行部分
+    try:
+        safe_print('请输入DOI或PMID，多个请用分号(;)分隔：')
+        input_content = input()
+        
+        # 分割多个DOI
+        doi_list = [doi.strip() for doi in input_content.split(';') if doi.strip()]
+        safe_print(f"检测到{len(doi_list)}个DOI/PMID")
+        
+        # 最大线程数 - 可根据系统资源调整
+        max_threads = min(5, len(doi_list))  # 最多5个线程，或DOI数量，取小者
+        
+        # 创建结果队列
+        result_queue = queue.Queue()
+        
+        # 创建线程
+        threads = []
+        for i, doi in enumerate(doi_list):
+            # 标记最后一个DOI
+            is_last = (i == len(doi_list) - 1)
+            
+            thread = threading.Thread(
+                target=process_doi, 
+                args=(doi, result_queue, i+1, is_last)
+            )
+            threads.append(thread)
+            thread.start()
+            time.sleep(5)  # 避免同时启动过多浏览器
+            
+            # 如果活动线程数达到最大，等待某个线程完成
+            while threading.active_count() > max_threads + 1:  # +1 是因为主线程也算一个
+                time.sleep(1)
+        
+        # 等待所有线程完成
+        for thread in threads:
+            thread.join()
+        
+        # 处理结果
+        successful_downloads = []
+        failed_downloads = []
+        final_credits = "无法获得剩余积分"
+        
+        while not result_queue.empty():
+            result = result_queue.get()
+            status = result[0]
+            
+            if status == 'success':
+                doi, name = result[1], result[2]
+                successful_downloads.append((doi, name))
+            elif status == 'fail':
+                doi, error = result[1], result[2]
+                failed_downloads.append((doi, error))
+            elif status == 'credits':
+                final_credits = result[1]
+        
+        # 显示下载文件夹中的文件
+        safe_print("\n下载文件夹中的最新文件:")
+        recent_files = []
+        for file in os.listdir(download_folder):
+            file_path = os.path.join(download_folder, file)
+            if os.path.isfile(file_path):
+                # 记录文件和其创建时间
+                recent_files.append((file, os.path.getctime(file_path)))
+        
+        # 按创建时间排序，最新的在前
+        recent_files.sort(key=lambda x: x[1], reverse=True)
+        
+        # 显示最新的10个文件或者全部（如果少于10个）
+        for file, create_time in recent_files[:10]:
+            create_time_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(create_time))
+            safe_print(f"- {file} (创建时间: {create_time_str})")
+        
+        # 显示处理结果摘要
+        safe_print("\n处理结果摘要:")
+        safe_print(f"- 成功处理的文献: {len(successful_downloads)}/{len(doi_list)}")
+        if successful_downloads:
+            for doi, name in successful_downloads:
+                safe_print(f"  - 成功: {doi} ({name})")
+        if failed_downloads:
+            for doi, error in failed_downloads:
+                safe_print(f"  - 失败: {doi} (错误: {error})")
+        safe_print(f"- 当前剩余积分: {final_credits}")
+
+    except Exception as e:
+        error_msg = f"程序执行过程中发生错误: {str(e)}"
+        safe_print(error_msg)
+        safe_print(traceback.format_exc())
+
+    finally:
+        # 等待用户关闭
+        input("\n所有操作已完成，按回车键关闭...")
+
+except Exception as e:
+    logging.error(f"发生错误: {str(e)}")
+    input("按Enter键退出...")
